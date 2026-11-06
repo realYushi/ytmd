@@ -1,0 +1,3 @@
+# runtime: yt-dlp (CLI) must be installed and Chrome logged into YouTube
+# python deps:
+opencc-python-reimplemented>=0.1.7   # 简体输出的保底转换（无此套件仍可运行，会跳过）

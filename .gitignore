@@ -1,0 +1,14 @@
+# downloaded caption cache (large, re-fetchable)
+channels/*/subs/
+
+# regenerated channel listing
+channels/*/data/videos.tsv
+
+# python
+__pycache__/
+*.pyc
+
+# logs / misc
+*.log
+*.tmp
+.DS_Store

@@ -509,6 +509,11 @@ def build(ws, rows, lang, mode, polished=False, out="", heading=None, fmt="md"):
     heading = heading or f"# {ws.get('handle', ws['slug'])} · {label['title']}" + (
         f"（{label['polished']}）" if polished and zh else " (polished)" if polished else "")
 
+    if not sections:
+        print(f"build: skipped {os.path.basename(name)} — no sources cached "
+              f"(fetch captions first, or run without --build-only)")
+        return name
+
     if fmt == "txt":
         def plain(x):
             return x.replace("**", "").replace("> ", "").rstrip()
@@ -549,9 +554,6 @@ def build(ws, rows, lang, mode, polished=False, out="", heading=None, fmt="md"):
             label["toc"],
             "",
         ]
-        if not sections and os.path.exists(name) and os.path.getsize(name) > 1000:
-            print(f"build: skipped {name} — no sources available (would overwrite {os.path.getsize(name)//1024} KB)")
-            return name
         with open(name, "w", encoding="utf-8") as f:
             f.write("\n".join(head) + "\n")
             f.write("\n".join(toc) + "\n\n---\n\n")

@@ -578,7 +578,8 @@ def main():
     ap.add_argument("--refresh-list", action="store_true", help="re-scrape the channel listing")
     ap.add_argument("--workers", type=int, default=2, help="parallel caption downloads (default 2)")
     ap.add_argument("--polish-workers", type=int, default=4)
-    ap.add_argument("--limit", type=int, default=0, help="process only the first N videos")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="process only the first N videos (the output then contains just those N)")
     ap.add_argument("--force-polish", action="store_true")
     ap.add_argument("--model", default="deepseek/deepseek-flash")
     ap.add_argument("--reasoning", default="none", help="reasoning_effort for the polish model ('' to enable thinking)")
@@ -613,7 +614,7 @@ def main():
         for fmt in formats:
             out = args.out if args.out.lower().endswith("." + fmt) else ""
             build(ws, rows, lang, mode, polished=False, out="", fmt=fmt)
-            if os.path.isdir(ws["polished"]) and os.listdir(ws["polished"]):
+            if mode != "none" and os.path.isdir(ws["polished"]) and os.listdir(ws["polished"]):
                 build(ws, rows, lang, mode, polished=True, out=out, fmt=fmt)
         return
 

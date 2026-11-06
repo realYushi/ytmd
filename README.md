@@ -1,115 +1,241 @@
-# ytmd — YouTube 頻道逐字稿 → 單一 markdown
+# ytmd — YouTube channel → one transcript file
 
-通用版：任何 YouTube 頻道都能跑，不再綁定 @drbergchinese。
-每個頻道一個獨立工作區 `channels/<slug>/`，互不干擾。
+Turn **any** YouTube channel into a single transcript document (`.md` + `.txt`), optionally
+machine-polished into clean Simplified Chinese.
 
-## 快速開始
+Built to be driven by an AI agent: no prompts, no interactive steps, resumable, and every
+stage is safe to re-run.
 
 ```bash
-# 最近 30 天（預設），抓 zh-Hant 字幕 + 潤色成簡體中文
-python3 ytmd.py --channel "@drbergchinese"
-
-# 只要純文字檔（.txt）
-python3 ytmd.py --channel "@drbergchinese" --format txt
-python3 ytmd.py --channel "@drbergchinese" --format both      # md + txt 都出
-
-# 任何頻道、任何語言
-python3 ytmd.py --channel "@hubermanlab" --days 7 --lang en --polish source
-python3 ytmd.py --channel "https://www.youtube.com/@somechannel" --all          # 全頻道
-python3 ytmd.py --channel "@somechannel" --days 90 --polish zh-hant            # 繁體潤色
-python3 ytmd.py --channel "@somechannel" --video "https://youtu.be/XXXXXXXXXXX" # 單片
-python3 ytmd.py --channel "@somechannel" --build-only                          # 只重建 md（0.5 s）
+python3 ytmd.py --channel "@drbergchinese"          # last 30 days → channels/drbergchinese/transcripts*.md
 ```
 
-## 產出
+---
+
+## For agents — start here
+
+Three commands cover 95% of use. All are non-interactive; none need stdin.
+
+| Goal | Command | Time |
+|---|---|---|
+| Channel, default window (30 days) | `python3 ytmd.py --channel "@handle"` | 2–25 min |
+| Whole channel | `python3 ytmd.py --channel "@handle" --all` | hours — run in background |
+| One video | `python3 ytmd.py --channel "@handle" --video "https://youtu.be/XXXXXXXXXXX"` | ~15 s |
+| Rebuild from cache only | `python3 ytmd.py --channel "@handle" --build-only` | ~0.5 s |
+| English channel, English text | `python3 ytmd.py --channel "@handle" --lang en --polish source` | as above |
+
+**How to tell it worked** — the run ends with `build:` lines naming the files and their video count:
 
 ```
-channels/<slug>/
-├── transcripts.md            # 原始字幕（逐字稿）
-├── transcripts.txt           # 同上，純文字版
-├── transcripts-zh-hans.md    # 潤色版（模式 zh-hans；其他模式為 -zh-hant / -polished）
-├── transcripts-zh-hans.txt   # 同上，純文字版
-├── channel.json              # 這個頻道記住的 channel / lang / polish 設定
-├── data/videos.tsv           # 頻道清單（6 小時內重複使用）
-├── data/videos_window.tsv    # 本次選中的影片（上次跑的範圍）
-├── data/meta_all.tsv         # 發佈日 / 時長 / 觀看數 cache
-├── subs/<id>.<lang>.json3    # 原始字幕 cache
-└── polished/<id>.md          # 潤色逐字稿 cache（可直接手改）
+build: /…/channels/<slug>/transcripts.md (125 videos, 920 KB)
+build: /…/channels/<slug>/transcripts-zh-hans.md (125 videos, 898 KB)
 ```
 
-設定會被記住：之後只寫 `--channel "@somechannel" --build-only`（或省略 `--lang/--polish`）會沿用上次的設定。
+Exit code is **0** on success. Exit code **1** with a message on stderr means a hard failure
+(channel unreadable, empty window, no cache for `--build-only`).
 
-## 參數
+A run can exit 0 while some videos are missing captions. Watch for this line — treat `N > 0` as a partial result:
 
-| 參數 | 說明 |
+```
+warning: 3 videos have no zh-Hant captions
+  no captions, skipped 3: abc12345678, def12345678, ...
+```
+
+Videos that fail are **not** written as empty sections; the file only contains what exists.
+
+---
+
+## Setup (one time, ~5 min)
+
+### 1. Python + yt-dlp
+
+```bash
+python3 --version          # 3.9+ works (built and tested on 3.15)
+yt-dlp --version           # must exist; install with: brew install yt-dlp
+pip install opencc-python-reimplemented   # optional: guarantees zero traditional characters in zh-hans output
+```
+
+### 2. Chrome logged into YouTube — required
+
+Caption downloads use `--cookies-from-browser chrome`. Without cookies YouTube answers
+`HTTP Error 429: Too Many Requests` within a few videos.
+
+```bash
+# verify the browser session is usable for captions
+yt-dlp --cookies-from-browser chrome --skip-download --write-auto-subs \
+  --sub-langs zh-Hant --sub-format json3 -o /tmp/probe/%\(id\)s \
+  "https://www.youtube.com/watch?v=ne6xylXZLbU" && ls /tmp/probe
+```
+
+- Chrome must be installed, logged in, and **not** running with `--disable-cookies`.
+- macOS may ask for Keychain access the first time; allow it (the CLI cannot prompt for you).
+- On a headless box with no Chrome, this pipeline will not work as-is; supply cookies another
+  way and swap the `COOKIES` constant in `ytmd.py`.
+
+### 3. Polish model (only needed for the polish stage)
+
+Polishing calls the local **magpie** proxy configured in `~/.pi/agent/models.json`. No API key
+is stored in this repo; the key is read from that file at runtime.
+
+```bash
+# provider health check (prints baseUrl + whether a key resolved, never the key itself)
+python3 -c "
+import json,os,urllib.request
+p=json.load(open(os.path.expanduser('~/.pi/agent/models.json')))['providers']['magpie']
+k=p['apiKey']; k=os.environ.get(k[4:],'') if k.startswith('env:') else k
+print('baseUrl:', p['baseUrl'], '| key resolved:', bool(k))
+print('proxy status:', urllib.request.urlopen(p['baseUrl'].rstrip('/')+'/models', timeout=5).status)
+"
+```
+
+Expected: `baseUrl: http://127.0.0.1:3425/v1 | key resolved: True` and `proxy status: 200`.
+If it fails, the proxy is down — skip polishing with `--polish none` and the pipeline still
+produces raw transcripts.
+
+### 4. Sanity check (all of the above at once)
+
+```bash
+python3 ytmd.py --channel "@drbergchinese" --build-only --format both
+```
+
+Expected on a fresh clone: `transcripts-zh-hans.*` rebuilt from committed `polished/`, and
+
+```
+build: skipped transcripts.md — no sources cached (fetch captions first, or run without --build-only)
+```
+
+That skip is correct behaviour: `subs/` is gitignored, and the build refuses to write an empty file.
+
+---
+
+## Usage
+
+```bash
+# windows
+python3 ytmd.py --channel "@handle"                     # 30 days (default)
+python3 ytmd.py --channel "@handle" --days 7
+python3 ytmd.py --channel "@handle" --all               # entire channel
+python3 ytmd.py --channel "@handle" --limit 3           # smoke test: first 3 videos
+
+# language / polishing
+python3 ytmd.py --channel "@handle" --lang zh-Hant --polish zh-hans   # (default for Chinese)
+python3 ytmd.py --channel "@handle" --lang zh-Hans  --polish zh-hant
+python3 ytmd.py --channel "@handle" --lang en       --polish source   # keep English, fix punctuation only
+python3 ytmd.py --channel "@handle" --polish none                     # raw transcripts, no LLM
+
+# formats and paths
+python3 ytmd.py --channel "@handle" --format txt        # txt only
+python3 ytmd.py --channel "@handle" --format both       # md + txt (default: md)
+python3 ytmd.py --channel "@handle" --build-only --out /tmp/x.txt
+
+# re-processing
+python3 ytmd.py --channel "@handle" --force-polish      # redo every polish job
+python3 ytmd.py --channel "@handle" --refresh-list      # re-scrape channel listing (6 h cache)
+```
+
+`--channel` accepts `@handle`, a full URL, or `/channel/UC…`. Settings (`lang`, `polish`) are
+remembered per channel in `channels/<slug>/channel.json`, so later runs only need `--channel`.
+
+`--polish none` writes only the raw transcript (no polished file, no LLM calls), but it also
+persists `polish: none` for that channel — add `--polish zh-hans` on a later run to switch back.
+
+### Flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--channel` | *required* | channel URL / `@handle` / `/channel/UC…` |
+| `--days N` | `30` | uploads from the last N days |
+| `--all` | off | shorthand for `--days 0` (everything) |
+| `--lang` | `zh-Hant` | caption track: `zh-Hant`, `zh-Hans`, `en`, `ja`, … |
+| `--polish` | auto | `zh-hans` / `zh-hant` / `source` / `none`; defaults to `zh-hans` for Chinese captions, `source` otherwise |
+| `--video` | — | process a single URL/ID only |
+| `--build-only` | off | rebuild from cache, zero network calls |
+| `--format` | `md` | `md`, `txt`, or `both` |
+| `--out` | — | explicit output path (extension picks the format) |
+| `--workers` | `2` | parallel caption downloads; raise carefully (see 429 below) |
+| `--polish-workers` | `4` | parallel LLM requests |
+| `--limit N` | `0` | process only the first N videos — the output file then contains just those N; pass `--out` if you want to keep the full file |
+| `--force-polish` | off | ignore existing `polished/*.md` |
+| `--reasoning` | `none` | `none` = fast/cheap; `""` = enable model thinking (~5× slower, slightly cleaner) |
+| `--model` | `deepseek/deepseek-flash` | polish model id from `models.json` |
+| `--refresh-list` | off | bypass the 6-hour channel-listing cache |
+
+### Outputs
+
+```
+channels/<slug>/                      slug = @handle lowercased
+├── transcripts.md / .txt             raw captions
+├── transcripts-zh-hans.md / .txt     polished (suffix varies: -zh-hant, -polished)
+├── channel.json                      remembered channel / lang / polish
+├── polished/<videoId>.md             per-video polished text — committed, hand-editable
+└── data/{videos,videos_window,meta_all}.tsv
+```
+
+`transcripts*` files: header → numbered TOC → one section per video, newest first, with
+date · duration · views · canonical URL. `.txt` is the same content without markdown syntax
+(`===` rules, plain URLs) so it opens in any editor.
+
+### Timing / cost (measured)
+
+| Step | Cost |
 |---|---|
-| `--channel` | 頻道 URL、`@handle`、`/channel/UC...`（必填） |
-| `--days N` | 只處理最近 N 天的上傳（預設 30） |
-| `--all` | 等於 `--days 0`：整個頻道 |
-| `--lang` | 字幕語言：`zh-Hant`（預設）`zh-Hans` `en` `ja` … |
-| `--polish` | `zh-hans` / `zh-hant` / `source`（同語言清理）/ `none`（不潤色）；預設：中文字幕→`zh-hans`，其他→`source` |
-| `--video` | 只處理單一影片（可同時加進清單） |
-| `--build-only` | 不連網，只用 cache 重建 md |
-| `--refresh-list` | 強制重抓頻道清單（預設 6 小時 cache） |
-| `--workers` | 平行抓字幕，預設 2（太高會被 429） |
-| `--polish-workers` | 平行潤色，預設 4 |
-| `--limit N` | 只處理前 N 部（抽樣測試用） |
-| `--force-polish` | 重新潤色（預設跳過已有的 `polished/*.md`） |
-| `--model` | 潤色模型，預設 `deepseek/deepseek-flash` |
-| `--reasoning` | `none`（預設，快 5 倍）/ `""`（開啟思考，較精緻） |
-| `--format` | `md`（預設）/ `txt` / `both`；txt 為純文字（`===` 分隔線 + 目錄 + 段落，無 markdown 語法） |
-| `--out` | 自訂輸出路徑（副檔名 .md / .txt 對應哪一種格式） |
+| Channel listing (5k videos) | ~1 min, cached 6 h |
+| Upload-date window search | ~1 s (cached dates) … ~30 s (cold) |
+| Captions | ~6 s/video, `--workers 2` |
+| Polish | ~4 s per 1.2k-char chunk, `--workers 4`; 125 videos ≈ 220 s, ~170k output tokens |
+| Build | 0.4 s for 125 videos |
 
-## 流程
+---
 
-```
-list    yt-dlp --flat-playlist               頻道清單（3263 部 ≈ 1 min，6 小時 cache）
-window  二分搜尋發佈日 → 最近 N 天            已抓過日期的片子直接查 cache，不用探測
-fetch   yt-dlp --write-auto-subs              每部 ~6 s；可 WORKERS 並行；429 會自動退避重試
-polish  切塊(~1200字) → LLM → 拼接            每部 ~2 s（4 並行）
-build   排序 + 目錄 + 影片資訊 → md            0.4 s/125 部
-```
+## Agent notes
 
-實測（125 部、一個月）：字幕約 16 分鐘（2 並行）、潤色 224 秒、321 次 API 呼叫
-（276 k input / 171 k output tokens）。全部 cache 命中時整份重建 0.5 秒。
+- **Long commands**: `--all` on a big channel can run for hours. Run it detached
+  (`nohup … &`), then poll the output file or re-run `--build-only` to see progress.
+  Caption fetching alone is ~6 s/video; budget > 30 min for a 300-video channel.
+- **Resumability**: every stage skips work that already exists (`subs/<id>.<lang>.json3`,
+  `polished/<id>.md`, cached dates). Killing a run and restarting is always safe.
+- **Rate limits**: YouTube throttles `/api/timedtext` per IP and it can last tens of minutes.
+  The fetcher retries 4 passes with exponential backoff and reports what is still missing.
+  Lower `--workers` to 1–2 if you see sustained 429s; do not add parallelism to "fix" it.
+- **Do not** hand-write or truncate `transcripts*` files: they are generated. Edit
+  `polished/<id>.md` instead (the model will not overwrite it without `--force-polish`).
+- **Idempotency**: re-running with the same window produces byte-identical outputs except
+  for the `Generated:` date.
+- **No network**: `--build-only` makes zero requests; use it in CI or offline.
+- **Reading results programmatically**: the `build:` lines are stable
+  (`build: <path> (<n> videos, <kb> KB)`), and the TOC lists all titles.
 
-潤色模式 `zh-hans` 會多做一次 opencc `t2s` 保底轉換，確保輸出不含繁體字。
+---
 
-## 前置需求
+## Troubleshooting
 
-- `yt-dlp`，且 **Chrome 已登入 YouTube**（腳本用 `--cookies-from-browser chrome`；沒有 cookie 會被擋 429）
-- `python3`；`pip install opencc-python-reimplemented`（簡繁保底轉換用，可選）
-- 潤色用 `~/.pi/agent/models.json` 裏的 `magpie` provider（本機 proxy），不需要額外 key
-
-## 疑難排解
-
-| 症狀 | 處理 |
+| Symptom | Cause / fix |
 |---|---|
-| `HTTP Error 429` 大量出現 | YouTube 對 `/api/timedtext` 限流，通常幾十分鐘到數小時；工具會自動退避重試。降低 `--workers`（1–2）可減少觸發。 |
-| `could not list channel` | 頻道網址錯，或 cookie 過期（重新用 Chrome 登入 YouTube）。 |
-| 某片沒有指定語言字幕 | 該片沒有這條字幕軌；`--lang en` / `--lang zh-Hant` 換一條，或略過。build 時會跳過並列出。 |
-| 潤色結果明顯變短 | 正常是原文字數 0.78–0.93 倍（只刪機翻重複語）。低於 0.6 表示被摘要了：`--force-polish --limit …` 重跑該片。 |
-| 想改潤色風格 | 改 `ytmd.py` 裏的 `PROMPTS`（zh-hans / zh-hant / source），再 `--force-polish`。 |
-| 單篇修稿 | 直接編輯 `channels/<slug>/polished/<id>.md`，再 `--build-only`。模型不會覆蓋（除非 `--force-polish`）。 |
+| `HTTP Error 429` on most videos | IP throttling on `/api/timedtext`. Wait (10 min – hours), keep `--workers 1`. Not a config error. |
+| `could not list channel` | Bad URL, or Chrome session expired → log into YouTube in Chrome again. |
+| `no videos in the selected window` | `--days` too small for a slow channel; use `--days 90` or `--all`. |
+| `nothing cached yet; run without --build-only first` | Fresh clone with no `subs/`: run once with network. |
+| Some videos silently absent | They have no captions in `--lang`; the run reports `no captions, skipped N`. Try `--lang en`. |
+| Polished text suspiciously short | Normal is 0.78–0.93× the raw char count. Below 0.6 means it summarized: `--force-polish --limit N`. |
+| Traditional characters leak into `zh-hans` | Install `opencc-python-reimplemented`; the build runs a `t2s` safety pass when it is present. |
+| Polish stage hangs | magpie proxy down → `--polish none`, or check the health command in Setup §3. |
 
-## repo 結構
+---
+
+## Repo layout
 
 ```
-ytmd.py            全部流程（list / window / fetch / polish / build）
-README.md          本文件
-requirements.txt   python 依賴（只有 opencc 可選）
-channels/          每個頻道一個工作區，產出物會 commit
-  <slug>/
-    channel.json          頻道設定（channel / lang / polish）
-    transcripts.md/.txt   原始字幕
-    transcripts-*.md/.txt 潤色版
-    polished/             潤色逐字稿 cache（commit，--build-only 靠它）
-    data/meta_all.tsv     發佈日 / 時長 / 觀看數 cache（commit）
-    data/videos*.tsv      頻道清單（gitignore，可重抓）
-    subs/                 原始字幕 cache（gitignore，可重抓）
+ytmd.py             the whole pipeline: list → window → fetch → polish → build
+README.md           this file
+requirements.txt    python deps (opencc is optional)
+channels/<slug>/    one workspace per channel; transcripts + polished/ are committed
 ```
 
-`subs/` 與 `data/videos.tsv` 不進版控（合計約 19 MB，隨時可重抓）；其餘都 commit，
-所以 clone 下來 `--build-only` 就能重建 markdown / txt。
+`subs/` (raw caption cache, ~19 MB per 125 videos) and `data/videos.tsv` (channel listing)
+are gitignored — both are re-fetchable, and no build needs them if `polished/` is present.
 
-首次在乾淨的 clone 上跑完整流程，會重新抓頻道清單與字幕，並為缺 cache 的影片重新潤色。
+## Content note
+
+Transcripts are YouTube auto-captions of the original channels' videos and remain the
+respective owners' content; the polish stage rewrites wording only (no summarizing, no added
+claims) and is not a substitute for the videos or for medical/professional advice.
